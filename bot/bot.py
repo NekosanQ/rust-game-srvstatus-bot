@@ -52,10 +52,16 @@ def get_process_list():
 def parse_rcon_server_info(message: str):
     try:
         data = json.loads(message)
-        return {
+        server_info = {
+            "players": max(0, int(data["Players"])),
+            "max_players": max(0, int(data["MaxPlayers"])),
             "queue": max(0, int(data["Queued"])),
             "joining": max(0, int(data["Joining"])),
         }
+        for source, target in (("Hostname", "name"), ("Map", "map")):
+            if source in data:
+                server_info[target] = data[source]
+        return server_info
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as e:
         logger.warning(f"Invalid RCON serverinfo response: {e}")
         return None
@@ -156,6 +162,10 @@ def get_server_info(process_output: str | None = None):
     if process_status == "starting":
         return {"status": "starting"}
 
+    rcon_info = get_rcon_server_info()
+    if rcon_info is not None:
+        return rcon_info
+
     info = get_a2s_info()
     if info is None:
         return None
@@ -167,10 +177,6 @@ def get_server_info(process_output: str | None = None):
         "map": info.map_name,
         "ping": round(info.ping * 1000, 2),
     }
-    rcon_info = get_rcon_server_info()
-    if rcon_info is not None:
-        server_info.update(rcon_info)
-
     return server_info
 
 

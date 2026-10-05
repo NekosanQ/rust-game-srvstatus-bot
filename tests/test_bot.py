@@ -3,6 +3,8 @@ import json
 import sys
 import types
 
+import pytest
+
 
 class DummyInfo:
     server_name = "MyServer"
@@ -60,16 +62,48 @@ def test_get_server_info_returns_parsed_data():
         return DummyInfo()
 
     bot = import_bot_with_fakes(fake_info)
-    bot.get_rcon_server_info = lambda: {"queue": 3, "joining": 2}
+    bot.get_rcon_server_info = lambda: None
     assert bot.get_server_info(process_output="") == {
         "name": "MyServer",
         "players": 5,
         "max_players": 20,
         "map": "my_map",
         "ping": round(0.123 * 1000, 2),
+    }
+
+
+@pytest.mark.parametrize("players", [0, 7])
+def test_get_server_info_prefers_rcon_without_querying_a2s(players):
+    def fake_info(addr, timeout=None):
+        pytest.fail("A2S must not be queried when RCON succeeds")
+
+    bot = import_bot_with_fakes(fake_info)
+    bot.get_rcon_server_info = lambda: bot.parse_rcon_server_info(json.dumps({
+        "Hostname": "MyServer",
+        "Map": "my_map",
+        "Players": players,
+        "MaxPlayers": 30,
+        "Queued": 3,
+        "Joining": 2,
+    }))
+
+    assert bot.get_server_info(process_output="") == {
+        "name": "MyServer",
+        "map": "my_map",
+        "players": players,
+        "max_players": 30,
         "queue": 3,
         "joining": 2,
     }
+
+
+def test_get_server_info_falls_back_when_rcon_response_is_invalid():
+    bot = import_bot_with_fakes(lambda addr, timeout=None: DummyInfo())
+    bot.get_rcon_server_info = lambda: bot.parse_rcon_server_info(
+        '{"Queued":3,"Joining":2}'
+    )
+
+    assert bot.get_server_info(process_output="")["players"] == 5
 
 
 def test_get_server_info_returns_none_on_error():
@@ -77,6 +111,7 @@ def test_get_server_info_returns_none_on_error():
         raise RuntimeError("query failed")
 
     bot = import_bot_with_fakes(fake_info)
+    bot.get_rcon_server_info = lambda: None
     assert bot.get_server_info(process_output="") is None
 
 
@@ -125,8 +160,20 @@ def test_parse_rcon_server_info():
 
     assert bot.parse_rcon_server_info(
         '{"Players":5,"MaxPlayers":20,"Queued":3,"Joining":2}'
-    ) == {"queue": 3, "joining": 2}
-    assert bot.parse_rcon_server_info("not json") is None
+    ) == {"players": 5, "max_players": 20, "queue": 3, "joining": 2}
+
+
+@pytest.mark.parametrize("message", [
+    "not json",
+    "null",
+    "[]",
+    '{"Queued":3,"Joining":2}',
+    '{"Players":"invalid","MaxPlayers":20,"Queued":3,"Joining":2}',
+])
+def test_parse_rcon_server_info_rejects_invalid_counts(message):
+    bot = import_bot_with_fakes(lambda addr: DummyInfo())
+
+    assert bot.parse_rcon_server_info(message) is None
 
 
 def test_get_rcon_server_info_requests_serverinfo():
@@ -147,7 +194,7 @@ def test_get_rcon_server_info_requests_serverinfo():
         def recv(self):
             return json.dumps({
                 "Identifier": 1001,
-                "Message": '{"Queued":3,"Joining":2}',
+                "Message": '{"Players":7,"MaxPlayers":30,"Queued":3,"Joining":2}',
             })
 
         def close(self):
@@ -161,6 +208,8 @@ def test_get_rcon_server_info_requests_serverinfo():
         return connection
 
     assert bot.get_rcon_server_info(fake_connection_factory) == {
+        "players": 7,
+        "max_players": 30,
         "queue": 3,
         "joining": 2,
     }
@@ -170,3 +219,17 @@ def test_get_rcon_server_info_requests_serverinfo():
         "Name": "WebRcon",
     }
     assert connection.closed is True
+
+
+def test_get_server_info_falls_back_when_rcon_connection_fails():
+    bot = import_bot_with_fakes(lambda addr, timeout=None: DummyInfo())
+    bot.RCON_PASSWORD = "secret"
+
+    def fake_connection_factory(url, timeout):
+        raise OSError("connection refused")
+
+    query_rcon = bot.get_rcon_server_info
+    bot.get_rcon_server_info = lambda: query_rcon(fake_connection_factory)
+
+    info = bot.get_server_info(process_output="")
+    assert bot.format_status_text(info) == "👥 5/20"
